@@ -52,14 +52,14 @@ int main(int argc, char ** argv)
     //now start the system
     while (true)
     {
-        RESLAM::System reSlam(settingsFile,datasetFile);//,datasetFile,nRuns);
+        RESLAM::System reSlam(settingsFile,datasetFile);//,datasetFile,nRuns); 系统入口
 
 #ifdef WITH_PANGOLIN_VIEWER
         auto viewer = std::make_unique<RESLAM::IOWrap::PangolinDSOViewer>(640,480, reSlam.returnSystemSettings(),false);
         outputWrappers.push_back(viewer.get());
         reSlam.addOutputWrapper(outputWrappers);
         std::thread runthread([&]() {
-            if (viewer != nullptr) viewer->run();
+            if (viewer != nullptr) viewer->run();  // 开启 Pangolin 可视化线程
             reSlam.stopSystem();
         });
 #endif

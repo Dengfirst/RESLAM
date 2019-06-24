@@ -80,6 +80,7 @@ Tracker::TrackerStatus Tracker::trackFrames(const FrameData& targetFrame, const 
     {
         auto startTime = Timer::getTime();
         I3D_LOG(i3d::info) << "Tracking level: " << lvl << " from " << sourceFrame.mKeyFrameId << " to " << targetFrame.mKeyFrameId;
+        //! 在不同尺度的金字塔进行跟踪
         trackingStatus = trackFrameOnLvl(targetFrame,sourceFrame,static_cast<size_t>(lvl), T_t_s, resInfo);
 
         //Something went wrong!
@@ -89,6 +90,7 @@ Tracker::TrackerStatus Tracker::trackFrames(const FrameData& targetFrame, const 
             //Try again with backup pose
             T_t_s = backupPose;
         }
+        // TrackerShowIterationsDebug: 0  and  flagIterationsDebug = false
         if (mSystemSettings.TrackerShowIterationsDebug || flagIterationsDebug)
         {
             reprojectToImage(targetFrame,sourceFrame,T_t_s);
@@ -98,6 +100,7 @@ Tracker::TrackerStatus Tracker::trackFrames(const FrameData& targetFrame, const 
     }
 
     //Compute optical flow
+    //! 计算两帧之前的光流
     computeOpticalFlow(targetFrame,sourceFrame,T_t_s,resInfo);
     //try new quality assessment
     // auto valid = histogramVotingAfterTracking(targetFrame,sourceFrame,T_t_s,resInfo);
@@ -142,6 +145,13 @@ Tracker::computeOpticalFlow(const FrameData& targetFrame, const FrameData& sourc
     }
 }
 
+/**
+ * [Tracker::findInitAndTrackFrames  从5种情况里选择合适的跟踪初值并进行跟踪]
+ * @param targetFrame
+ * @param sourceFrame
+ * @param T_ref_N     返回的位姿
+ * @param posesToTry
+**/
 Tracker::TrackerStatus 
 Tracker::findInitAndTrackFrames(const FrameData& targetFrame, const FrameData& sourceFrame, SE3Pose& T_ref_N, const PoseVector& posesToTry) const
 {
@@ -203,15 +213,23 @@ Tracker::reprojectToImage(const FrameData& targetFrame, const FrameData& sourceF
     if (WaitFlag) cv::waitKey(0);
 }
 
+/**
+ * [float Tracker::findInit  寻找合适的跟踪初值]
+ * @param targetFrame
+ * @param sourceFrame
+ * @param posesToTry
+ * @param T_init      跟踪初值
+**/
 float
 Tracker::findInit(const FrameData& targetFrame, const FrameData&  sourceFrame, const PoseVector posesToTry, SE3Pose& T_init) const
 {
     auto minCost = FLOAT_INF;
     //What happens when I only have one or two poses?
+    //! 计算每一种初始位姿的收敛代价
     for (const SE3Pose& pose : posesToTry)
     {
         const auto testCost = evaluateCostFunction(targetFrame,sourceFrame,pose);
-        if (mSystemSettings.TrackerShowInitDebug)
+        if (mSystemSettings.TrackerShowInitDebug)  // TrackerShowInitDebug: 0
             reprojectToImage(targetFrame,sourceFrame,pose,"findInit");
         if (testCost < minCost)
         {
@@ -222,6 +240,7 @@ Tracker::findInit(const FrameData& targetFrame, const FrameData&  sourceFrame, c
     return minCost;
 }
 
+//! 计算每种初始位姿的代价
 float
 Tracker::evaluateCostFunction(const FrameData& targetFrame, const FrameData& sourceFrame, const SE3Pose& T_t_s) const
 {
@@ -507,7 +526,15 @@ float Tracker::evaluateCostFunctionFast(const FrameData& targetFrame, const Fram
  * Note: If you just want to compute the reprojection, use evaluateCostFunctionFast, which skips
  * many intermediate computations.
  */
-
+/**
+ * [Tracker::calculateErrorsAndBuffers 计算两帧边缘误差]
+ * @param targetFrame 目标帧（新加入frame）
+ * @param sourceFrame 源帧（最新的关键帧）
+ * @param T_init      位姿
+ * @param lvl         金字塔尺度
+ * @param resInfo
+ * @param FILL_BUFFERS
+**/
 float Tracker::calculateErrorsAndBuffers(const FrameData& targetFrame, const FrameData&  sourceFrame,
                                          const SE3Pose& T_init, const size_t lvl, ResidualInfo& resInfo, const bool FILL_BUFFERS) const
 {
@@ -517,6 +544,7 @@ float Tracker::calculateErrorsAndBuffers(const FrameData& targetFrame, const Fra
     size_t nResiduals{0};
     const auto resFactor = 2;//( 1 << lvl); //basically takes only every 4th on the lowest pyr lvl ...
     //Edge detections are always on the top level -> inv(K) at lvl 0
+    //! Setp 1：将 sourceFrame的像素点投影到 targetFrame 帧
     const Mat33f K_inv = mCameraMatrix.K_inv[0];
     const Vec3f t = T_init.translation().cast<float>();
     const Mat33f RK_i = T_init.rotationMatrix().cast<float>()*K_inv;
@@ -533,14 +561,20 @@ float Tracker::calculateErrorsAndBuffers(const FrameData& targetFrame, const Fra
             nResiduals++;
             if ((nResiduals % resFactor) != 0) continue;
         }
+        //! 获取边缘点像素坐标
         const Vec2f pt2D = edgePixel->getPixel2D();//Vec2E(edgePixel.hostX,edgePixel.hostY);
+        //! 齐次化像素坐标
         const Vec3f ptHom = pt2D.homogeneous();
+        //! 反投影，获取在当前帧相机坐标系下的坐标
         Vec3f newPt3D = RK_i*ptHom + t*edgePixel->idepth;
+        //! 逆深度齐次化 3D相机坐标系坐标坐标
         const auto z_inv = 1.0f/newPt3D[2];
         const auto new_idepth = edgePixel->idepth/newPt3D[2];
         newPt3D[0] *= z_inv;
         newPt3D[1] *= z_inv;
+        //! 计算在当前帧像素坐标
         const Vec2f newPt2D(fx*newPt3D[0]+cx,fy*newPt3D[1]+cy);
+        //! 异常值统计，判断是否在图像边界内或深度小于 0
         if (!isInImageGreater(mCameraMatrix.imageBounds[lvl],newPt2D) || new_idepth <= 0)
         {
             ++resInfo.nBadEdges;
@@ -548,6 +582,7 @@ float Tracker::calculateErrorsAndBuffers(const FrameData& targetFrame, const Fra
         }
 
         //Now, we have to interpolate
+        //! 线性插值，计算残差和梯度
         const auto resInterp =  getInterpolatedElement33(optLvl,newPt2D[0],newPt2D[1],width); //residual,dx,dy
         if (std::isnan(resInterp[0]) || std::isnan(resInterp[1]) || std::isnan(resInterp[2]))
         {
@@ -561,6 +596,7 @@ float Tracker::calculateErrorsAndBuffers(const FrameData& targetFrame, const Fra
             ++resInfo.nBadEdges;
             continue;
         }
+        //! 计算残差权重
         const auto resWeight = getWeightOfEvoR(residual,mSystemSettings.TrackerResidualHuberWeight);
 
         //Compute the derivatives!
@@ -718,7 +754,7 @@ Tracker::TrackerStatus Tracker::trackFrameOnLvl(const FrameData& targetFrame, co
     I3D_LOG(i3d::info) << "Computing rel. transformation between: "<< targetFrame.mFrameHeader->mFrameId << "(" 
                        << std::fixed << targetFrame.mFrameSet->mTimestamp << ") and " 
                        << sourceFrame.mFrameHeader->mFrameId << "(" << sourceFrame.mFrameSet->mTimestamp << ") on lvl: " << lvl;
-    
+    //! 有效像素点小于200，则跟踪失败
     if (sourceFrame.mFrameSet->mValidEdgePixels.size() < 200)
     {
         I3D_LOG(i3d::fatal) << "LOST because pixel < 200";

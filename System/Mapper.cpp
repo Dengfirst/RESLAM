@@ -78,6 +78,16 @@ Mapper::Mapper(const SystemSettings& ebSlamSystemSettings):
 
 Mapper::~Mapper() = default;
 
+/**
+ * [Mapper::computePosesToTry 尝试计算相机位姿]
+ * posesToTry：
+ * 1）单位阵
+ * 2）无运动 T(n-1,kf)
+ * 3）连续运动 T(n-1,n-2)*T(n-1,kf)
+ * 4）半运动
+ * 5）双倍运动 T(n-1,n-2)*T(n-1,n-2)*T(n-1,kf)
+ * return 当前帧和关键帧之间的运动 T(frame,kf)
+**/
 PoseVector 
 Mapper::computePosesToTry() const
 {
@@ -89,15 +99,15 @@ Mapper::computePosesToTry() const
     //This is currently keyframe to frame
     if (size > 1) //In contrast to DSO, we have not added the newest frame to the list!
     {
-        const auto &F_NM1 = mAllFrameHeaders[size-1],
-                   &F_NM2 = mAllFrameHeaders[size-2];
-        const SE3Pose T_NM1_KF = F_NM1->getWorldToCam()*mAllKeyFrameHeaders.back()->getCamToWorld();
-        const SE3Pose T_NM1_NM2 = F_NM1->getWorldToCam()*F_NM2->getCamToWorld();
+        const auto &F_NM1 = mAllFrameHeaders[size-1],  // n-1帧
+                   &F_NM2 = mAllFrameHeaders[size-2];  // n-2帧
+        const SE3Pose T_NM1_KF = F_NM1->getWorldToCam()*mAllKeyFrameHeaders.back()->getCamToWorld();  //  T(n-1,kf) = T(n-1,w) * T(w,kf)
+        const SE3Pose T_NM1_NM2 = F_NM1->getWorldToCam()*F_NM2->getCamToWorld();  // T(n-1,n-2) = T(n-1,w) * T(w,n-2)
         lock.unlock();
-        posesToTry.push_back(T_NM1_KF); //stop (zero motion from last frame)
-        posesToTry.push_back(T_NM1_NM2*T_NM1_KF); //constant motion
-        posesToTry.push_back(SE3Pose::exp(T_NM1_NM2.log()*0.5)*T_NM1_KF);//half motion
-        posesToTry.push_back(T_NM1_NM2*T_NM1_NM2*T_NM1_KF);//double motion (e.g. frame skip)
+        posesToTry.push_back(T_NM1_KF); //stop (zero motion from last frame)  T(n-1,kf)
+        posesToTry.push_back(T_NM1_NM2*T_NM1_KF); //constant motion  T(n-1,n-2)*T(n-1,kf)
+        posesToTry.push_back(SE3Pose::exp(T_NM1_NM2.log()*0.5)*T_NM1_KF);//half motion 0.5*log(T(n-1,n-2)) * T(n-1,kf)
+        posesToTry.push_back(T_NM1_NM2*T_NM1_NM2*T_NM1_KF);//double motion (e.g. frame skip) T(n-1,n-2)*T(n-1,n-2)*T(n-1,kf)
     }
 
     if (mSystemSettings.TrackerTrackFromFrameToKf)
@@ -388,6 +398,7 @@ Mapper::updatePosesAfterLoopClosure(const CeresPoseVector& updatedCamToWorldPose
     if (mSystemSettings.EnableLocalMapping) mLocalMapper->printWindowPoses();
 }
 
+//! 为当前帧添加 ID，计算关键帧在世界坐标系下的位姿
 void 
 Mapper::addKeyFrameHeaderAndId(std::unique_ptr<FrameHeader> fh)
 {
@@ -395,9 +406,9 @@ Mapper::addKeyFrameHeaderAndId(std::unique_ptr<FrameHeader> fh)
     if (fh != nullptr)
     {
         std::lock_guard<std::mutex> lock(mAllFrameHeadersMutex);
-        fh->mFrameId = mAllFrameHeaders.size();
+        fh->mFrameId = mAllFrameHeaders.size(); // mFrameId 根据 mAllFrameHeaders 大小来定义的
         //If not empty, compute the world pose
-        if (!mAllKeyFrameHeaders.empty()) fh->updateCamToWorld(mAllKeyFrameHeaders.back()->getCamToWorld()*fh->getCamToRef());
+        if (!mAllKeyFrameHeaders.empty()) fh->updateCamToWorld(mAllKeyFrameHeaders.back()->getCamToWorld()*fh->getCamToRef()); // T(w,c) = T(w,k-1) * T(k-1,c)
         mAllKeyFrameHeaders.push_back(fh.get());
         mAllFrameHeaders.push_back(std::move(fh));
     }
@@ -450,7 +461,8 @@ Mapper::outputPoses() const
 void 
 Mapper::addKeyFrameToAll(std::unique_ptr<FrameData> kf, const bool checkLoop)
 {
-    kf->makeKeyFrame(mCameraMatrix);
+    // 1)通过对灰度图进行距离变换细化边缘检测；2)降采样把低尺度边缘检测结果转换为高尺度，同时计算像素梯度；3)通过深度值是否在有效区间选择有效的边缘像素点
+    kf->makeKeyFrame(mCameraMatrix); //! 把当前帧设置为关键帧
     I3D_LOG(i3d::info) << "addKeyFrameHeaderAndId" << kf->mKeyFrameId << std::fixed << " timestamp: " << kf->mFrameHeader->mTimestamp;
     FrameData* kfPtr = kf.get();
     if (kf != nullptr)
@@ -458,11 +470,12 @@ Mapper::addKeyFrameToAll(std::unique_ptr<FrameData> kf, const bool checkLoop)
         {
             I3D_LOG(i3d::info) << "lock addKeyFrameToAll frames mode!";
             std::lock_guard<std::mutex> lock(mAllKeyFrameDataMutex);
-            kf->mKeyFrameId = mAllKeyFrameData.size();
-            kf->setEvalPT_scaled(kf->mFrameHeader->getWorldToCam());
+            kf->mKeyFrameId = mAllKeyFrameData.size(); // 通过 mAllKeyFrameData的大小设置关键帧 ID
+            // set the pose Tcw
+            kf->setEvalPT_scaled(kf->mFrameHeader->getWorldToCam()); // 设置初始状态和尺度
             mAllKeyFrameData.push_back(std::move(kf));
         }
-        if (!mSystemSettings.EnableLocalMapping)
+        if (!mSystemSettings.EnableLocalMapping)  // EnableLocalMapping：1
         {
             for (auto& wrapper : mOutputWrapper)
             {
@@ -472,8 +485,9 @@ Mapper::addKeyFrameToAll(std::unique_ptr<FrameData> kf, const bool checkLoop)
         }
         else
         {
+            //! Local Mapping 开启局部地图
             const auto startTime = Timer::getTime();
-            if (mSystemSettings.LocalMapperLinearProcessing)
+            if (mSystemSettings.LocalMapperLinearProcessing)  // LocalMapperLinearProcessing：1
                 mLocalMapper->localMappingLinear(kfPtr);
             else
                 mLocalMapper->queueKeyframe(kfPtr);

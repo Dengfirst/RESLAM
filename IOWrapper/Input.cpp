@@ -116,6 +116,12 @@ InputDatasetReader::~InputDatasetReader()
     if (mFileList.is_open()) mFileList.close();
 }
 
+/**
+ * [InputDatasetReader::getImages 从数据集读取图像序列]
+ * @param rgb       [ ]
+ * @param depth     [ ]
+ * @param timestamp [ ]
+**/
 bool 
 InputDatasetReader::getImages(cv::Mat& rgb,cv::Mat& depth, double& timestamp)
 {
@@ -131,9 +137,11 @@ InputDatasetReader::getImages(cv::Mat& rgb,cv::Mat& depth, double& timestamp)
         ++mNbReceivedImages;
         I3D_LOG(i3d::info) << "mNbReceivedImages!" << mNbReceivedImages;
 
+        // 设置数据集开始帧读取位置
         if (mNbReceivedImages < mSystemSettings.InputSkipFirstNFrames) continue;
         std::istringstream is_associate(inputLine);
-        is_associate >> rgbTimeStamp >> currRGBFile >> depthTimeStamp >> currDepthFile;
+        is_associate >> rgbTimeStamp >> currRGBFile >> depthTimeStamp >> currDepthFile; // 载入 associate 文件
+        // 读取 RGB 和 depth 图片
         rgb = cv::imread(mSystemSettings.InputDatasetFolder+"/"+currRGBFile);
         depth = cv::imread(mSystemSettings.InputDatasetFolder+"/"+currDepthFile,CV_LOAD_IMAGE_UNCHANGED);
         //divide by 5000 to get distance in metres
@@ -143,6 +151,7 @@ InputDatasetReader::getImages(cv::Mat& rgb,cv::Mat& depth, double& timestamp)
         cv::cvtColor(rgb,gray,CV_BGRA2GRAY);
         return true;
     }
+    // 数据集读取完了
     LOG_THRESHOLD(i3d::info);
     I3D_LOG(i3d::info) << "Stopping reading images!";
     LOG_THRESHOLD(i3d::info);
@@ -150,6 +159,10 @@ InputDatasetReader::getImages(cv::Mat& rgb,cv::Mat& depth, double& timestamp)
     return false;
 }
 
+/**
+ * 1、传感器类型SensorType：以枚举的方式，包含 Dataset(默认)、OrbbecAstra、OrbbecAstraPro、RealsenseZR300、RealsenseD4XX
+ * 2、图像读取
+**/
 void 
 Input::startInput()
 {
@@ -168,7 +181,7 @@ Input::startInput()
                                 }
                             }();
     std::thread th(&Input::readImages,this);
-    th.detach();
+    th.detach(); //! 分离式线程
 }
 
 void
@@ -178,6 +191,10 @@ Input::stopInput()
     mSensor->stopSensor();
 }
 
+/**
+ * 读取图像
+ *
+**/
 void 
 Input::readImages()
 {
@@ -191,6 +208,7 @@ Input::readImages()
     {
         I3D_LOG(i3d::nothing) << "readImages loop!";
         double timestamp;
+        //! mInputFrameQueue图像序列保持10帧，超过10帧线程解锁，进行读取操作
         {
             std::unique_lock<std::mutex> lock(mInputFrameQueueMutex);
             if (mInputFrameQueue.size() > 10)
@@ -201,13 +219,14 @@ Input::readImages()
                 continue;
             }
         }
-        //read
+        //read 注意这里的时间戳用的是 depth 采集的时间
         if (!mSensor->getImages(rgb,depth,timestamp) || mNbOfImages > mSystemSettings.InputReadNFrames) break;
         I3D_LOG(i3d::nothing) << "Got image from sensor!" << mNbOfImages;
         //convert to gray
         cv::cvtColor(rgb,gray,(mSystemSettings.InputColorFormatRGB ? CV_RGB2GRAY : CV_BGR2GRAY));
             
         //add to queue
+        //! 计算深度图Jet,Canny边缘检测, come to FrameSet::FrameSet
         auto nextFrame = std::make_unique<FrameSet>(gray,depth,rgb,timestamp,mSystemSettings);
         {
             std::lock_guard<std::mutex> lock(mInputFrameQueueMutex);

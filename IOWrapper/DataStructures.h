@@ -292,7 +292,7 @@ public:
     Vec6 nullspaces_scale;
     Mat66 nullspaces_pose;
     bool FIX_WORLD_POSE = false;
-    inline Vec6 w2c_leftEps() const {return get_state_scaled().head<6>();}
+    inline Vec6 w2c_leftEps() const {return get_state_scaled().head<6>();} //x.head<n>() -> x(1:n)
 
     //Called during makeKeyframe
     size_t removeGoodEdgesWithoutResiduals();

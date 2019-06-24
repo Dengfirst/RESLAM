@@ -569,19 +569,25 @@ LocalMapper::printWindowPoses() const
     }
 }
 
+/**
+ * [LocalMapper::localMappingLinear 局部地图线程]
+ * 边缘化关键帧，为新关键帧添加 Hessian 矩阵， 重新计算参与优化的点，优化，移除外点，边缘化点，边缘化帧
+ * @param newKf [新的关键帧]
+**/
 void 
 LocalMapper::localMappingLinear(FrameData* newKf)
 {
     if (newKf == nullptr) return;
     std::lock_guard<std::mutex> lock(mFrameHessiansMutex);
-    printWindowPoses();
+    printWindowPoses();  // Just for debug
     // =========================== Flag Frames to be Marginalized. =========================
     flagFramesForMarginalization(newKf);
-    newKf->setEvalPT_scaled(newKf->mFrameHeader->getWorldToCam());//   camToWorld.inverse()); 
+    newKf->setEvalPT_scaled(newKf->mFrameHeader->getWorldToCam());//   camToWorld.inverse());
 
     // =========================== add New Frame to Hessian Struct. =========================
-    addKeyFrame(newKf);
+    addKeyFrame(newKf);  // mFrameHessians.push_back()
     constexpr size_t nFixedPoses{0};
+    //!!! 不固定就代表参与优化吗？？？
     for (auto& f : mFrameHessians)
         f->FIX_WORLD_POSE = false;
 
@@ -854,9 +860,10 @@ LocalMapper::setPrecalcValues()
  */
 void LocalMapper::addKeyFrame(FrameData* refFrameNew)
 {
-    refFrameNew->idx = mFrameHessians.size();
-    mFrameHessians.push_back(refFrameNew);
-    mWindowedOptimizer->insertKeyFrame(refFrameNew,Hcalib);
+    refFrameNew->idx = mFrameHessians.size();  // 为新的参考帧添加 ID
+    mFrameHessians.push_back(refFrameNew);     // mFrameHessians存入
+    //! <dy> 关键帧插入时 setAdjointsF 计算 AHost和ATarget 不懂
+    mWindowedOptimizer->insertKeyFrame(refFrameNew,Hcalib); // 向滑动窗中插入关键帧
 }
 
 /**
@@ -998,7 +1005,11 @@ LocalMapper::activatePointsMT()
 
 }
 
-void 
+/**
+ * [LocalMapper::flagFramesForMarginalization 设置边缘化的帧]
+ * @param newFH [新的关键帧]
+**/
+void
 LocalMapper::flagFramesForMarginalization(FrameData* newFH)
 {
     LOG_THRESHOLD(i3d::info);
@@ -1007,6 +1018,7 @@ LocalMapper::flagFramesForMarginalization(FrameData* newFH)
 
     size_t nFramesFlagged{0};
     // marginalize all frames that have not enough points.
+    //! 边缘化没有足够点的帧
     for (auto& fh : mFrameHessians)
     {
         const auto in = fh->getEdgesGood().size() + fh->getDetectedEdges().size();
@@ -1021,6 +1033,7 @@ LocalMapper::flagFramesForMarginalization(FrameData* newFH)
 
     // marginalize one.
     //If we have too many frames
+    //! 维护一个固定大小的滑动窗，新加入一个就需要删除一个
     if(mFrameHessians.size() >= LMS::MaxFrames + nFramesFlagged)
     {
         double smallestScore = 1;
@@ -1031,7 +1044,7 @@ LocalMapper::flagFramesForMarginalization(FrameData* newFH)
         for(auto* fh : mFrameHessians)
         {
             if((fh->mKeyFrameId + LMS::MinFrameAge) > (latest->mKeyFrameId ) || fh->mKeyFrameId == 0) continue;
-
+            //! 计算距离评分
             const auto distScore = fh->computeTargetPrecalcDistScore(latest);
             I3D_LOG(i3d::fatal) << "frameIdAll: " << fh->mFrameHeader->mFrameId << " keyframeId: " << fh->mKeyFrameId << " score: " << distScore;
             if(distScore < smallestScore)

@@ -99,7 +99,8 @@ class Input
             std::lock_guard<std::mutex> lock(mInputFrameQueueMutex);
             return !mInputFrameQueue.empty();
         }
-        
+
+        //! 读取 startInput()函数中的readImages()函数中的图像队列 mInputFrameQueue
         std::unique_ptr<FrameSet> getFirstFrame()
         {
             std::lock_guard<std::mutex> lock(mInputFrameQueueMutex);

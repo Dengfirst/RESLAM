@@ -220,6 +220,7 @@ System::startSystem()
 {
     //We have to process a linear and a mult-thread pipeline
     //For now, we assume that at least the sensor and the ui work in a thread
+    //! 图像读取,计算深度图Jet,Canny边缘检测
     mInputWrapper.startInput();
     if (mSystemSettings.InputReadGT)
         mOutputWrapper[0]->addGtTrajectory(mGtPoses);
@@ -227,6 +228,7 @@ System::startSystem()
     while (mInputWrapper.inputIsActive()) 
     {
         I3D_LOG(i3d::info) << "input is still active!";
+        // 读取 startInput()函数中的readImages()函数中的图像队列 mInputFrameQueue
         auto newestFrameSet = mInputWrapper.getFirstFrame();
         I3D_LOG(i3d::info) << "Got frame!";
         if (newestFrameSet == nullptr)
@@ -234,9 +236,10 @@ System::startSystem()
           std::this_thread::sleep_for(std::chrono::milliseconds(5));
           continue;
         } 
-        auto newFrameHeader = std::make_unique<FrameHeader>(newestFrameSet->mTimestamp,0);
+        auto newFrameHeader = std::make_unique<FrameHeader>(newestFrameSet->mTimestamp,0); // 时间戳, ID and mIsKeyFrame=false
         //Transfer ownership
-        auto newFrameData = std::make_unique<FrameData>(newFrameHeader.get(),std::move(newestFrameSet),mSystemSettings);
+        auto newFrameData = std::make_unique<FrameData>(newFrameHeader.get(),std::move(newestFrameSet),mSystemSettings); // 时间戳+ID frame config
+        //! Tracking
         processFrame(std::move(newFrameData),std::move(newFrameHeader));
     }
     printSLAMReport();
@@ -272,14 +275,19 @@ System::printSLAMReport()
     I3D_LOG(i3d::info) << "-----------------------------------------------------------------------------";
 }
 
-void 
+/**
+ * [System::processFrame Tracking!!!]
+ * @param newFrameData   [时间戳+ID frame config]
+ * @param newFrameHeader [时间戳 and ID]
+**/
+void
 System::processFrame(std::unique_ptr<FrameData> newFrameData, std::unique_ptr<FrameHeader> newFrameHeader)
 {
     //new frame
     switch (mSystemStatus)
     {
         case SystemStatus::Init: //Check if the init pose is really I in the frameHeader
-                                    mMapper.addKeyFrameHeaderAndId(std::move(newFrameHeader));
+                                    mMapper.addKeyFrameHeaderAndId(std::move(newFrameHeader));  // 为当前帧添加 ID，计算关键帧在世界坐标系下的位姿
                                     {
                                         const auto* ptrToLastKf = newFrameData.get();
                                         mMapper.addKeyFrameToAll(std::move(newFrameData));
@@ -306,13 +314,15 @@ System::trackNewestFrame(std::unique_ptr<FrameData> newFrameData, std::unique_pt
     static size_t nFramesTracker{0};
     //compute old poses
     SE3Pose T_ref_N;
+    //! 获取最近的关键帧
     const FrameData* newestKeyframe = mMapper.getMostRecentKeyframe();
     const auto startT = Timer::getTime();
+    //! 尝试计算位姿 T(frame,kf)
     PoseVector posesToTry = mMapper.computePosesToTry();
     const auto endT = Timer::getTime();
     I3D_LOG(i3d::info) << "Time for computing poses: " << Timer::getTimeDiffMiS(startT,endT);
 
-    if (mSystemSettings.TrackerTrackFromFrameToKf)
+    if (mSystemSettings.TrackerTrackFromFrameToKf)  // TrackerTrackFromFrameToKf: 0
     {
         for (auto& p : posesToTry)
         {
@@ -320,6 +330,7 @@ System::trackNewestFrame(std::unique_ptr<FrameData> newFrameData, std::unique_pt
         }
     }
     const auto startTime = Timer::getTime();
+    //! 从5种情况里选择合适的跟踪初值并进行跟踪
     auto trackingStatus = (mSystemSettings.TrackerTrackFromFrameToKf ?
                 mTracker->findInitAndTrackFrames(*newestKeyframe, *newFrameData, T_ref_N, posesToTry) :
                 mTracker->findInitAndTrackFrames(*newFrameData, *newestKeyframe, T_ref_N, posesToTry));

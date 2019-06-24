@@ -39,6 +39,14 @@ namespace RESLAM
 {
 int EdgeFrameResidual::instanceCounter = 0;
 
+/**
+ * [FrameSet::FrameSet 计算深度图Jet，Canny边缘检测]
+ * @param gray_     [输出的灰度图]
+ * @param depth_    []
+ * @param rgb_      []
+ * @param _timestamp []
+ * @param config    []
+**/
 FrameSet::FrameSet(const cv::Mat& gray_, const cv::Mat& depth_, const cv::Mat& rgb_,
                    double _timestamp, const SystemSettings& config): mTimestamp(_timestamp),depthJet(depth_.cols, depth_.rows)
 {
@@ -64,11 +72,14 @@ FrameSet::FrameSet(const cv::Mat& gray_, const cv::Mat& depth_, const cv::Mat& r
             {
                 //this is the standard image normalization but a lot of terms cancel out since they are either 1 or 0
                 const auto normalizedDepth = (depthVal-min)/(max-min);
+                // 颜色图谱（colormap), 默认绘制为RGB颜色空间。同时，存有其他空间，例如Jet，由 蓝-青-黄-红 组成。
+                // 为了显示设置吗???<dy>
                 depthJet.setPixel1(x,y,makeJet3B(normalizedDepth));
             }
             else depthJet.setPixel1(x,y,ColorBlack);
         }
-    //Edge detection    
+    //Edge detection
+    //! 注意：根据配置参数图像无需高斯模糊操作
     if (config.InputSmoothEdgeImage)
     {
         cv::GaussianBlur(gray_,grayScaleImg,cv::Size(3,3),2);
@@ -78,6 +89,7 @@ FrameSet::FrameSet(const cv::Mat& gray_, const cv::Mat& depth_, const cv::Mat& r
         grayScaleImg = gray_.clone();
     }
     grayScaleImg.convertTo(grayScaleImgF,CV_32FC1);
+    //! InputComputeGradientsForEdgeDetector: 0
     if (config.InputComputeGradientsForEdgeDetector)
     {
         cv::Mat gradX,gradY;
@@ -90,16 +102,17 @@ FrameSet::FrameSet(const cv::Mat& gray_, const cv::Mat& depth_, const cv::Mat& r
         cv::Canny(grayScaleImg,edgeImage,config.InputCannyEdgeTh1, config.InputCannyEdgeTh2,3,true);
     }
 }
+//! 为关键帧添加属性
 void 
 FrameData::makeKeyFrame(const CameraMatrix& camMat)
 {
     
-    mFrameHeader->makeKeyFrame();
-    mFrameHeader->setRefFrame(this);
+    mFrameHeader->makeKeyFrame();     // 把帧设置为关键帧  T(ref,cam)  T(cam,ref)
+    mFrameHeader->setRefFrame(this);  // 把当前关键帧设置为参考关键帧
     I3D_LOG(i3d::info) << "Making " << std::fixed << mFrameSet->mTimestamp << " to keyframe with id: " << mKeyFrameId;
     //Compute the distance transform if it is not already computed
-    computeOptimizationStructure(camMat);
-    computeValidEdgePixels();
+    computeOptimizationStructure(camMat); // 通过对灰度图进行距离变换细化边缘检测；降采样把低尺度边缘检测结果转换为高尺度，同时计算像素梯度。
+    computeValidEdgePixels(); // 通过深度值是否在有效区间选择有效的边缘像素点
 }
 
 FrameData::~FrameData()
@@ -124,17 +137,26 @@ FrameData::~FrameData()
 
 }
 
+/**
+ * [FrameData::computeOptimizationStructure]
+ * First Step:  对灰度图进行距离变换细化边缘检测
+ * Second Step: 降采样把低尺度D(N-1)边缘检测结果转换为高尺度D(N)，同时计算像素梯度。
+ * @param camMat [图像矩阵]
+**/
 void 
 FrameData::computeOptimizationStructure(const CameraMatrix& camMat)
 {
     if (mOptStructureAlreadyComputed) return;
-    
+    //! 1.1距离变换：需要逆变换图像，计算任意点到背景点(像素值为0的点，即黑色)的(欧式)距离
     cv::distanceTransform(255-mFrameSet->edgeImage,mFrameSet->distanceTransform,CV_DIST_L2, CV_DIST_MASK_PRECISE);
 
     // Allocate memory for the optimization structures
+    //! 1.2 把图像矩阵变换位一维索引
     for (size_t lvl = 0; lvl < PyramidLevels; ++lvl)
     {
-        //sizeof(Vec3f) = 3 * 4 bytes
+        //sizeof(Vec3f) = 3 * 4 bytes , area[] = width[] * height[]
+        //! 注意数据类型： std::array<Vec3f*,PyramidLevels> mOptStructures, 先选PyramidLevels，再选Vec3f，最后是array。
+        //! 例，mOptStructures[array][Vec3f][PyramidLevels]
         mOptStructures[lvl] = (reinterpret_cast<Vec3f*>(Eigen::internal::aligned_malloc(camMat.area[lvl]*sizeof(Vec3f))));
         I3D_LOG(i3d::detail) << "size: " << camMat.area[lvl]*sizeof(Vec3f) << " lvl: " << lvl;
     }
@@ -144,6 +166,8 @@ FrameData::computeOptimizationStructure(const CameraMatrix& camMat)
     Vec3f* optLvl0 = mOptStructures.front();
     //Fill the first level of the optimization structure with the DT
     for (auto idx = 0; idx < camMat.area[0]; ++idx) optLvl0[idx][0] = dtPt[idx];
+
+    //! 2.1降采样
     for (size_t lvl = 0; lvl < PyramidLevels; ++lvl)
     {
         Vec3f *optPyrLvl = mOptStructures[lvl];
@@ -158,6 +182,7 @@ FrameData::computeOptimizationStructure(const CameraMatrix& camMat)
                 for (auto row = 0; row < hLvl; ++row)
                 {
                     //to downscale the DT a simple mean is not enough, since the pixel distances also half! -> instead of 4, we divide by 8
+                    //! 注意计算均值时除以的是 8
                     optPyrLvl[col + row * wLvl][0] = (optPyrTopLvl[2*col + 2*row*wTopLvl][0]+optPyrTopLvl[2*col+1 + 2*row*wTopLvl][0]+
                                                       optPyrTopLvl[2*col+1 + 2*row*wTopLvl+wTopLvl][0]+optPyrTopLvl[2*col + 2*row*wTopLvl+wTopLvl][0]) * 0.125f;
                     dtLvl.at<float>(row,col) = optPyrLvl[col + row * wLvl][0];
@@ -168,6 +193,7 @@ FrameData::computeOptimizationStructure(const CameraMatrix& camMat)
         //for all the lvls compute the gradient in x and y
         //skip first and last line
         //first and last column are also wrong, but we simply do not edges reprojected there!
+        //! 计算除了第一行和最后一行的图像梯度
         for (auto idx = wLvl; idx < wLvl*(hLvl-1); ++idx)
         {
             //Note: The gradient is inverted compared to photometric approaches!
@@ -187,8 +213,10 @@ FrameData::computeOptimizationStructure(const CameraMatrix& camMat)
  */
 void FrameData::prepareForTracking(const SystemSettings& settings, const CameraMatrix& camMat)
 {
-    if (settings.TrackerTrackFromFrameToKf)
+    // 从当前帧到关键帧，只计算有效边
+    if (settings.TrackerTrackFromFrameToKf)  // TrackerTrackFromFrameToKf: 0
         computeValidEdgePixels();
+    // 从关键帧到当前帧，计算 DT
     else
         computeOptimizationStructure(camMat);
 }
@@ -201,6 +229,9 @@ const SE3Pose FrameHeader::getWorldPoseFromRef() const
     return mReferenceFrame->getPRE_camToWorld()*mT_ref_cam; 
 }
 
+/**
+ * [FrameData::computeValidEdgePixels 通过深度值是否在有效区间选择有效的边缘像素点]
+**/
 void
 FrameData::computeValidEdgePixels()
 {
@@ -209,17 +240,17 @@ FrameData::computeValidEdgePixels()
     const cv::Mat edgeImage = mFrameSet->edgeImage;
     const cv::Mat depthImage = mFrameSet->depth;
     const cv::Mat gradMagn; // -> generate this
-    constexpr size_t ApproximateAmountOfEdges{30000};
+    constexpr size_t ApproximateAmountOfEdges{30000}; // 设置最大的边缘数量
     mFrameSet->mValidEdgePixels.reserve(ApproximateAmountOfEdges);
     double min,max;
-    cv::minMaxIdx(depthImage,&min,&max);
-    const auto start = Timer::getTime();
+    cv::minMaxIdx(depthImage,&min,&max); // Find the min and max in an array
+    const auto start = Timer::getTime(); // 获取系统时间
     //Don't go through the border pixels at the moment 
     for (auto xx = 3; xx <= width-4; ++xx)
         for (auto yy = 3; yy <= height-4; ++yy)
         {
             const uint8_t edgePixel = edgeImage.at<uint8_t>(yy,xx);
-            if (isEdge(edgePixel))
+            if (isEdge(edgePixel))  // 1 if "binary" edge and 255 if "white"
             {
                 const float depthVal = depthImage.at<float>(yy,xx);
                 if (isValidDepth(depthVal,mSystemSettings.InputDepthMin,mSystemSettings.InputDepthMax))
@@ -372,10 +403,10 @@ CameraMatrix::setValueScaled(const VecC &value_scaled)
     value[3] = SCALE_C_INVERSE * value_scaled[3];
 
     this->value_minus_value_zero = this->value - this->value_zero;
-    this->value_scaledi[0] = 1.0f / this->value_scaledf[0];
-    this->value_scaledi[1] = 1.0f / this->value_scaledf[1];
-    this->value_scaledi[2] = - this->value_scaledf[2] / this->value_scaledf[0];
-    this->value_scaledi[3] = - this->value_scaledf[3] / this->value_scaledf[1];
+    this->value_scaledi[0] = 1.0f / this->value_scaledf[0]; //fx
+    this->value_scaledi[1] = 1.0f / this->value_scaledf[1]; //fy
+    this->value_scaledi[2] = - this->value_scaledf[2] / this->value_scaledf[0]; // cx/fx
+    this->value_scaledi[3] = - this->value_scaledf[3] / this->value_scaledf[1]; // cy/fy
     I3D_LOG(i3d::debug) << "value_scaled: " << value_scaled.transpose()
                         << " value: " << value.transpose()
                         << "value_minus_value_zero: " << value_scaledf.transpose();
@@ -511,14 +542,18 @@ FrameFramePrecalc::set(FrameData* host, FrameData* target, const CameraMatrix& H
 
 }
 
+/**
+ * [FrameData::setEvalPT_scaled ]
+ * @param worldToCam_evalPT [Tcw]
+**/
 void 
 FrameData::setEvalPT_scaled(const SE3Pose &worldToCam_evalPT)
 {
     I3D_LOG(i3d::debug) << mFrameHeader->mFrameId << ": worldToCam_evalPT: " << worldToCam_evalPT.matrix();
     Vec6 initial_state = Vec6::Zero();
     this->worldToCam_evalPT = worldToCam_evalPT;
-    setStateScaled(initial_state);
-    setStateZero(this->get_state());
+    setStateScaled(initial_state);   // TODO <dy>???
+    setStateZero(this->get_state()); // TODO <dy>???不知所言
 }
 
 void 
@@ -545,7 +580,7 @@ FrameData::setStateScaled(const Vec6 &state_scaled)
 {
     if (FIX_WORLD_POSE) return;
     this->state_scaled = state_scaled;
-    state.segment<3>(0) = SCALE_XI_TRANS_INVERSE * state_scaled.segment<3>(0);
+    state.segment<3>(0) = SCALE_XI_TRANS_INVERSE * state_scaled.segment<3>(0);  //x.segment<n>(i) -> x(i+1 : i+n)
     state.segment<3>(3) = SCALE_XI_ROT_INVERSE * state_scaled.segment<3>(3);
     setPRE_worldToCam(SE3Pose::exp(w2c_leftEps()) * get_worldToCam_evalPT());
 }

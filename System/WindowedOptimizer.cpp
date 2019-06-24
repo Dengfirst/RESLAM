@@ -197,14 +197,18 @@ WindowedOptimizer::setAdjointsF(const CameraMatrix& HCalib)
             FrameData* host = mEFrames[h]->data;
             FrameData* target = mEFrames[t]->data;
 
+            //! Ttw * (Thw)^(-1) = Tth
             SE3Pose hostToTarget = target->get_worldToCam_evalPT() * host->get_worldToCam_evalPT().inverse();
 
 
             HessianType AH = HessianType::Identity();
+            //! AH = [R,t^R;0^T,R]^T
             AH.topLeftCorner<6,6>() = -hostToTarget.Adj().transpose();/*Mat88::Identity();*/
+            //! AT= I
             HessianType AT = HessianType::Identity();
 
-
+            //! AH= [R*0.5,t^R*0.5;0^T,R]^T
+            //! AT= [R*0.5,t^R*0.5;0^T,R]^T
             AH.block<3,MOTION_DOF>(0,0) *= SCALE_XI_TRANS;
             AH.block<3,MOTION_DOF>(3,0) *= SCALE_XI_ROT;
 
@@ -215,6 +219,7 @@ WindowedOptimizer::setAdjointsF(const CameraMatrix& HCalib)
             adHost[h+t*nFrames] = AH;
             adTarget[h+t*nFrames] = AT;
         }
+    //! 常量的矩阵
     cPrior = VecC::Constant(setting_initialCameraMatrix);
 
 
@@ -242,6 +247,7 @@ EFFrame::takeData()
     prior = data->getPrior().head<HessianSize>();
     delta = data->get_state_minus_stateZero().head<HessianSize>();
     delta_prior =  (data->get_state() - data->getPriorZero()).head<HessianSize>();
+    // I3D_LOG(i3d::info) << "data->get_state()=" <<  data->get_state() << "data->getPriorZero()=" << data->getPriorZero() << "delta_prior=" << delta_prior;
     frameID = data->mKeyFrameId;
     I3D_LOG(i3d::info) << "takeData: " << frameID << " = " << data->mKeyFrameId;
 }
@@ -257,6 +263,7 @@ WindowedOptimizer::insertKeyFrame(FrameData *keyFrame, const CameraMatrix& camer
     keyFrame->efFrame = eff;
 
     assert(HM.cols() == HessianSize*nFrames+CPARS-HessianSize);
+    //! 插入新关键帧，需要扩展 H 和 b 的维度
     bM.conservativeResize(HessianSize*nFrames+CPARS);
     HM.conservativeResize(HessianSize*nFrames+CPARS,HessianSize*nFrames+CPARS);
     bM.tail<HessianSize>().setZero();
